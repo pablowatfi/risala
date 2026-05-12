@@ -2,7 +2,7 @@ from typing import TypedDict, Optional
 
 
 class MessageState(TypedDict):
-    # Raw payload received from Gmail or Slack webhook
+    # Raw payload received from Gmail webhook or Slack Events API
     raw_event: dict
 
     # Normalised fields after ingestion agent
@@ -23,7 +23,7 @@ class MessageState(TypedDict):
     # Draft agent output
     draft: Optional[str]
 
-    # Set after human clicks a Slack action button
+    # Set after human taps a Telegram inline button
     user_decision: Optional[str]
 
     # DB primary key of the saved Message row

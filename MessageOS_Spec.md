@@ -15,7 +15,7 @@ and performs:
 4.  research augmentation (web search before user reads)
 5.  meeting recommendation (never auto-book)
 6.  draft email/message suggestion (never auto-send)
-7.  Slack-based user interaction
+7.  Telegram-based user interaction (approvals, alerts, digests)
 
 The system must use **LangGraph** for orchestration.
 
@@ -41,7 +41,7 @@ without explicit human approval.
 
 ### Rule 3 --- HUMAN IN LOOP
 
-Any external action requires Slack approval: - create calendar event -
+Any external action requires Telegram approval (inline button tap): - create calendar event -
 send draft to clipboard - mark done
 
 ------------------------------------------------------------------------
@@ -49,16 +49,15 @@ send draft to clipboard - mark done
 ## 3. High-level architecture
 
 ``` text
-Gmail (2) ----\
-               \
-                -> ingestion -> LangGraph -> action router -> Slack
-               /
-Slack --------/
+Gmail (2) --------\
+                   \
+                    -> ingestion -> LangGraph -> action router -> Telegram (alerts + buttons)
+                   /
+Slack workspace --/   (monitored inbox source)
 
-                    ↓
-                 PostgreSQL
-                    ↓
-                  Redis
+                           ↓
+                        PostgreSQL
+                        Redis
 ```
 
 Local deployment only.
@@ -103,9 +102,9 @@ Containerization: - Docker Compose
 
 ## 5. Local deployment requirements
 
-Gmail push notifications and Slack Events API both require a publicly
-accessible URL. Use **ngrok** (or localtunnel) to expose localhost during
-development.
+Gmail push notifications, the Slack Events API (inbox monitoring), and the Telegram
+webhook all require a publicly accessible URL. Use **ngrok** (or localtunnel) to expose
+localhost during development.
 
 ``` bash
 ngrok http 8000   # exposes FastAPI; copy the forwarding URL into .env
@@ -219,7 +218,7 @@ Output:
 }
 ```
 
-This appears in Slack alert.
+This appears in the Telegram alert.
 
 ------------------------------------------------------------------------
 
@@ -239,15 +238,15 @@ Check: - calendar free slots
 
 Generate options: - Tue 3pm - Wed 10am - Thu 4pm
 
-Then ask on Slack:
+Then send via Telegram:
 
 Example: "Recruiter requests technical interview.
 
 Available slots: 1. Tue 3pm 2. Wed 10am 3. Thu 4pm
 
-Options: \[Suggest Slot\] \[Draft Email Asking Details\] \[Ignore\]"
+[ Show Draft ]  [ Suggest Slots ]  [ Ask for More Info ]  [ ❌ Dismiss ]"
 
-Wait for user action.
+Wait for user to tap a button.
 
 ------------------------------------------------------------------------
 
@@ -303,7 +302,7 @@ class MessageState(TypedDict):
 ## 9. LangGraph flow
 
 When multiple conditions are true for a single message, agents run in
-**sequential priority order** before the Slack notification is sent:
+**sequential priority order** before the Telegram notification is sent:
 
 ``` text
 START
@@ -320,17 +319,17 @@ triage
   ↓
 [4] if reply_needed     -> draft_agent
   ↓
-slack_notification  (always runs if urgency >= medium)
+telegram_notification  (always runs if urgency >= medium)
   ↓
 WAIT
   ↓
-human action via Slack
+human taps Telegram button
   ↓
 execute approved action
 ```
 
 All intermediate results are merged into `MessageState` before
-`slack_notification` runs, so the Slack alert can include research
+`telegram_notification` runs, so the Telegram alert can include research
 context, available slots, extracted tasks, and a draft reply in one
 message.
 
@@ -460,7 +459,7 @@ message_os/
  │   ├── graph/
  │   ├── integrations/
  │   │    ├── gmail.py
- │   │    ├── slack.py
+ │   │    ├── telegram.py
  │   │    ├── calendar.py
  │   │    └── websearch.py
  │   ├── db/
@@ -479,11 +478,11 @@ message_os/
 Done when:
 
 -   receives Gmail from both accounts
--   receives Slack messages
+-   receives Slack messages (inbox monitoring)
 -   classifies urgency and category
 -   extracts tasks and stores them in Postgres
 -   runs research automatically when useful (via Tavily)
--   posts to Slack alerts with action buttons
+-   sends Telegram alerts with inline action buttons
 -   suggests meeting slots but does not book
 -   drafts replies but does not send
 -   stores everything in Postgres

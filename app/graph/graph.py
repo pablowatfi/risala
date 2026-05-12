@@ -6,7 +6,7 @@ from app.agents.research import research_node
 from app.agents.meeting import meeting_node
 from app.agents.task_agent import task_node
 from app.agents.draft import draft_node
-from app.agents.telegram_notify import telegram_notify_node as slack_notify_node
+from app.agents.telegram_notify import telegram_notify_node
 
 # ── Routing functions ────────────────────────────────────────────────────────
 # Each function decides where to go next in the sequential pipeline.
@@ -35,13 +35,13 @@ def _route_after_meeting(state: MessageState) -> str:
 def _route_after_task(state: MessageState) -> str:
     if state["classification"].get("needs_draft"):
         return "draft"
-    return "slack_notify"
+    return "telegram_notify"
 
 
 def _route_after_draft(state: MessageState) -> str:
     priority = state["classification"].get("priority", "low")
     if priority in ("high", "medium"):
-        return "slack_notify"
+        return "telegram_notify"
     return END
 
 
@@ -56,7 +56,7 @@ def build_graph(checkpointer=None):
     g.add_node("meeting", meeting_node)
     g.add_node("task_agent", task_node)
     g.add_node("draft", draft_node)
-    g.add_node("slack_notify", slack_notify_node)
+    g.add_node("telegram_notify", telegram_notify_node)
 
     g.set_entry_point("ingestion")
     g.add_edge("ingestion", "triage")
@@ -73,12 +73,12 @@ def build_graph(checkpointer=None):
     g.add_edge("meeting", "task_agent")
     g.add_conditional_edges("task_agent", _route_after_task, {
         "draft": "draft",
-        "slack_notify": "slack_notify",
+        "telegram_notify": "telegram_notify",
     })
     g.add_conditional_edges("draft", _route_after_draft, {
-        "slack_notify": "slack_notify",
+        "telegram_notify": "telegram_notify",
         END: END,
     })
-    g.add_edge("slack_notify", END)
+    g.add_edge("telegram_notify", END)
 
     return g.compile(checkpointer=checkpointer)

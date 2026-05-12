@@ -19,7 +19,7 @@ Body:
 {meeting_section}
 
 Guidelines:
-- Match the tone of the original (professional if email, casual if Slack)
+- Match the tone of the original (professional if email, casual if chat)
 - Be concise — no filler phrases
 - Do NOT sign the message (the user will fill in their name)
 - Do NOT send — this is a draft only"""

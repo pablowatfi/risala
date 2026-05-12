@@ -1,6 +1,6 @@
 # MessageOS
 
-A local-first AI assistant that monitors your Gmail inboxes and Slack workspace, classifies messages, extracts tasks, researches senders, suggests meeting slots, and drafts replies — all delivered to you via Slack with one-click action buttons.
+A local-first AI assistant that monitors your Gmail inboxes and Slack workspace, classifies messages, extracts tasks, researches senders, suggests meeting slots, and drafts replies — all delivered to you via **Telegram** with one-tap action buttons.
 
 **Nothing is ever sent or booked automatically.** Every external action requires your approval.
 
@@ -16,9 +16,9 @@ When a new email or Slack message arrives, MessageOS runs it through a pipeline:
 4. **Meeting** — if it's a meeting request, checks your Google Calendar and finds free slots
 5. **Task extraction** — pulls out action items and stores them in Postgres
 6. **Draft** — generates a suggested reply
-7. **Slack alert** — posts everything to `#message-os-alerts` with action buttons
+7. **Telegram alert** — posts everything to your personal chat with inline action buttons
 
-Three times a day (8 am, 12:30 pm, 7 pm) a digest summary is posted to `#message-os-digest`.
+Three times a day (8 am, 12:30 pm, 7 pm) a digest summary is sent via Telegram.
 
 ---
 
@@ -37,13 +37,16 @@ Slack workspace            ──┘         │
                           │  meeting (Calendar API) │
                           │  task extraction        │
                           │  draft (smart LLM)      │
-                          │  slack notification     │
+                          │  telegram notification  │
                           └────────────────────────┘
                                        │
                              ┌─────────┴─────────┐
                           Postgres              Redis
                       (messages, tasks,     (LangGraph state)
                        drafts, actions)
+                                       │
+                                   Telegram
+                              (alerts + approvals)
 ```
 
 ---
@@ -56,6 +59,7 @@ Slack workspace            ──┘         │
 | Orchestration | LangGraph, LangChain |
 | LLM | Ollama (default/free) · Groq (free cloud) · OpenAI (production) |
 | Search | Tavily API |
+| Notifications / UX | Telegram Bot API |
 | Database | PostgreSQL 16 |
 | Cache / state | Redis 7 |
 | Containerisation | Docker Compose |
@@ -65,9 +69,9 @@ Slack workspace            ──┘         │
 ## Prerequisites
 
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/)
-- [ngrok](https://ngrok.com/download) (free account) — exposes localhost to Gmail and Slack webhooks
+- [ngrok](https://ngrok.com/download) (free account) — exposes localhost to Gmail and Telegram webhooks
 - A Google Cloud project (for Gmail + Calendar)
-- A Slack app (for sending alerts and receiving events)
+- A Telegram bot (for alerts and approvals)
 - One of: Ollama running locally, a Groq API key, or an OpenAI API key
 
 ---
@@ -150,8 +154,8 @@ Run the OAuth flow once for each account. This opens a browser window and saves 
 python3 -m venv .venv
 source .venv/bin/activate
 
-# Install the Google dependencies
-pip install google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client
+# Install all dependencies
+pip install -r requirements.txt
 
 # Authorise work account
 python3 -c "from app.integrations.gmail import run_oauth_flow; run_oauth_flow('gmail_work')"
@@ -212,7 +216,7 @@ Gmail delivers new-message events via Google Cloud Pub/Sub.
 
 #### 4c. Register the webhook
 
-The app registers the webhook automatically on startup — no manual steps needed.  
+The app registers the Telegram webhook automatically on startup — no manual steps needed.
 It calls `setWebhook` pointing to `WEBHOOK_BASE_URL/telegram/webhook`.
 
 > Make sure ngrok is running and `WEBHOOK_BASE_URL` is set before starting the app.
@@ -245,7 +249,7 @@ If `TAVILY_API_KEY` is empty, the research agent is silently skipped.
 
 ### 6. Start ngrok
 
-ngrok exposes your local FastAPI server so Gmail and Slack can reach it.
+ngrok exposes your local FastAPI server so Gmail push notifications and the Telegram webhook can reach it.
 
 ```bash
 ngrok http 8000
@@ -258,7 +262,7 @@ WEBHOOK_BASE_URL=https://abc123.ngrok-free.app
 ```
 
 > You need to update this URL every time ngrok restarts (unless you have a paid ngrok account with a fixed domain).
-> After updating it, re-register the URL in both the Pub/Sub subscription and the Slack app settings.
+> After updating it, re-register the URL in the Pub/Sub subscription — the Telegram webhook is re-registered automatically on the next `docker compose up`.
 
 ---
 
@@ -273,7 +277,7 @@ This starts:
 - **redis** — pipeline state cache (port 6379)
 - **app** — FastAPI server (port 8000)
 
-On first boot, the app creates all database tables automatically.
+On first boot, the app creates all database tables and registers the Telegram webhook automatically.
 
 Check it's healthy:
 ```bash
@@ -342,7 +346,7 @@ These are hard-coded in the pipeline — no configuration can override them:
 
 - **Emails are never sent.** Drafts are only stored in the database and shown on request.
 - **Meetings are never booked.** The app is read-only on Google Calendar.
-- **Every external action requires a button click.** The pipeline always pauses at the Slack notification and waits for human input.
+- **Every external action requires a button tap.** The pipeline always pauses at the Telegram notification and waits for your input.
 
 ---
 
@@ -355,7 +359,7 @@ risala/
  │   ├── api/             # FastAPI webhook routes
  │   ├── db/              # SQLAlchemy models and session
  │   ├── graph/           # LangGraph state and graph wiring
- │   ├── integrations/    # Gmail, Slack, Calendar, Tavily clients
+ │   ├── integrations/    # Gmail, Telegram, Calendar, Tavily clients
  │   ├── config.py        # Typed settings from .env
  │   ├── llm.py           # LLM provider factory
  │   └── main.py          # App entry point, scheduler, lifespan
