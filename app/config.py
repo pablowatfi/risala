@@ -18,11 +18,9 @@ class Settings(BaseSettings):
     DATABASE_URL_SYNC: str = "postgresql://messageos:messageos@postgres:5432/messageos"
     REDIS_URL: str = "redis://redis:6379"
 
-    # Slack
-    SLACK_BOT_TOKEN: str = ""
-    SLACK_SIGNING_SECRET: str = ""
-    SLACK_ALERTS_CHANNEL: str = "#message-os-alerts"
-    SLACK_DIGEST_CHANNEL: str = "#message-os-digest"
+    # Telegram
+    TELEGRAM_BOT_TOKEN: str = ""
+    TELEGRAM_CHAT_ID: str = ""   # your personal chat ID with the bot
     DIGEST_TIMES: str = "08:00,12:30,19:00"
 
     # Gmail

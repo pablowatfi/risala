@@ -6,7 +6,7 @@ from app.agents.research import research_node
 from app.agents.meeting import meeting_node
 from app.agents.task_agent import task_node
 from app.agents.draft import draft_node
-from app.agents.slack_notify import slack_notify_node
+from app.agents.telegram_notify import telegram_notify_node as slack_notify_node
 
 # ── Routing functions ────────────────────────────────────────────────────────
 # Each function decides where to go next in the sequential pipeline.

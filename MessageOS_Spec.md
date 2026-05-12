@@ -19,6 +19,8 @@ and performs:
 
 The system must use **LangGraph** for orchestration.
 
+User interaction (approvals, drafts, slot selection) is handled via **Telegram**.
+
 ------------------------------------------------------------------------
 
 ## 2. Non-negotiable rules
@@ -69,6 +71,8 @@ Backend: - Python 3.12 - FastAPI
 
 Agents: - LangGraph - LangChain
 
+Notifications / UX: - Telegram Bot API (`python-telegram-bot`)
+
 LLM:
 
 Provider is selected via `LLM_PROVIDER` in `.env`. Two model tiers are
@@ -86,6 +90,8 @@ Fast model used for: classification, urgency scoring, lightweight extraction.
 All providers are supported by LangChain — swapping requires only the `.env` change; no code changes needed.
 
 Search: - Tavily API (web search for Research Agent)
+
+Notifications: - Telegram Bot (`python-telegram-bot>=21.0`)
 
 Database: - PostgreSQL (Docker) - Redis (state/cache)
 
@@ -255,19 +261,26 @@ Store draft.
 
 ------------------------------------------------------------------------
 
-### G. Slack Notification Agent
+### G. Telegram Notification Agent
 
-Posts to: `#message-os-alerts`
+Posts to: personal Telegram chat with the user (`TELEGRAM_CHAT_ID`)
 
 Only: - urgent - actionable
 
-Digest: `#message-os-digest` — fires **3× daily** at times set via `.env`:
+Message format: HTML, with inline keyboard buttons:
+- `[Show Draft]` — posts draft text
+- `[Suggest Slots]` — confirms slots from the alert
+- `[Ask for More Info]` — posts a clarification draft
+- `[❌ Dismiss]` — marks message as dismissed
+
+Digest: fires **3× daily** at times set via `.env`:
 
 ```
 DIGEST_TIMES=08:00,12:30,19:00   # system local timezone
 ```
 
 Each digest covers new messages since the previous digest window.
+Also triggerable on demand via `/digest` command sent to the bot.
 
 ------------------------------------------------------------------------
 
@@ -386,38 +399,45 @@ created_at
 
 ------------------------------------------------------------------------
 
-## 11. Slack UX
+## 11. Telegram UX
 
-Channel: `#message-os-alerts`
+All alerts and interaction go to the user's personal Telegram chat with the bot.
 
-Example: "🚨 Meta recruiter email
+Example alert:
 
-Detected: - category: meeting - urgency: high
+```
+🚨 Meeting Request: Technical Interview
 
-Research: - likely recruiter outreach - typical loop: coding + ML system
-design
+From: recruiter@meta.com
+Source: gmail_work  |  Priority: High
 
-Actions: \[Show Draft\] \[Suggest Slots\] \[Ask for More Info\]
-\[Dismiss\]"
+Research:
+Meta recently announced Q3 earnings beat. Hiring ML engineers for
+Ranking. Typical loop: coding + ML system design + behavioural.
 
-Buttons call the FastAPI backend webhook (`/slack/actions`).
+Available slots:
+1. Tue Jan 14, 3:00 PM
+2. Wed Jan 15, 10:00 AM
+3. Thu Jan 16, 4:00 PM
 
-**After a button is pressed**, the bot posts a **new message** in
-`#message-os-alerts` with the result:
+[ Show Draft ]  [ Suggest Slots ]
+[ Ask for More Info ]  [ ❌ Dismiss ]
+```
+
+Button callbacks hit `POST /telegram/webhook` (same endpoint as all updates).
+
+**After a button is tapped**, the bot posts a **new message** in the chat:
 
 | Button | New message contains |
 |---|---|
-| `[Show Draft]` | Full draft text + `[Copy to Clipboard]` |
-| `[Suggest Slots]` | Available slots + `[Confirm Slot X]` buttons |
-| `[Ask for More Info]` | Draft clarification email + `[Copy to Clipboard]` |
-| `[Dismiss]` | Confirmation that the alert was dismissed |
+| `[Show Draft]` | Draft text in a code block |
+| `[Suggest Slots]` | Confirmation of slots from the alert |
+| `[Ask for More Info]` | Clarification draft in a code block |
+| `[❌ Dismiss]` | "✓ Alert dismissed." |
 
-Meeting slots use the **system local timezone**. Number of slots
-suggested: 3 (configurable via `MEETING_SLOT_COUNT` in `.env`).
+Meeting slots use the **system local timezone**. Slot count configurable via `MEETING_SLOT_COUNT`.
 
-Digest channel: `#message-os-digest`, fires at 8:00 / 12:30 / 19:00
-(local time). Each digest summarises messages received since the previous
-digest window.
+Digest fires at 08:00 / 12:30 / 19:00 (local time) and can be triggered on demand with `/digest`.
 
 ------------------------------------------------------------------------
 

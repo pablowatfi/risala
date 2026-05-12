@@ -146,8 +146,12 @@ ollama pull llama3.2
 Run the OAuth flow once for each account. This opens a browser window and saves a token file.
 
 ```bash
-# Install dependencies locally first (only needed for this step)
-pip install google-auth-oauthlib google-api-python-client
+# Create and activate a local virtualenv (required on macOS with Homebrew Python)
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Install the Google dependencies
+pip install google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client
 
 # Authorise work account
 python3 -c "from app.integrations.gmail import run_oauth_flow; run_oauth_flow('gmail_work')"
@@ -155,6 +159,8 @@ python3 -c "from app.integrations.gmail import run_oauth_flow; run_oauth_flow('g
 # Authorise personal account
 python3 -c "from app.integrations.gmail import run_oauth_flow; run_oauth_flow('gmail_personal')"
 ```
+
+> The `.venv` is only needed for the OAuth step. The app itself runs inside Docker and does not use it.
 
 Token files are saved to `credentials/gmail_work_token.json` and `credentials/gmail_personal_token.json`. These are refreshed automatically at runtime.
 
@@ -180,67 +186,46 @@ Gmail delivers new-message events via Google Cloud Pub/Sub.
 
 ---
 
-### 4. Slack app
+### 4. Telegram bot
 
-#### 4a. Create the app
+#### 4a. Create the bot
 
-1. Go to [api.slack.com/apps](https://api.slack.com/apps) → **Create New App → From scratch**
-2. Name it `MessageOS`, select your workspace
+1. Open Telegram and search for **@BotFather**
+2. Send `/newbot` and follow the prompts (pick any name and username)
+3. BotFather replies with a token like `123456789:ABCdef...` — copy it into `.env`:
+   ```env
+   TELEGRAM_BOT_TOKEN=123456789:ABCdef...
+   ```
 
-#### 4b. Configure Bot Token Scopes
+#### 4b. Get your chat ID
 
-Go to **OAuth & Permissions → Scopes → Bot Token Scopes** and add:
+1. Search for your new bot in Telegram and send it `/start`
+2. Open this URL in your browser (replace with your token):
+   ```
+   https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates
+   ```
+3. Find `"chat": {"id": 123456789}` in the response — that number is your chat ID
+4. Add it to `.env`:
+   ```env
+   TELEGRAM_CHAT_ID=123456789
+   ```
 
-| Scope | Purpose |
+#### 4c. Register the webhook
+
+The app registers the webhook automatically on startup — no manual steps needed.  
+It calls `setWebhook` pointing to `WEBHOOK_BASE_URL/telegram/webhook`.
+
+> Make sure ngrok is running and `WEBHOOK_BASE_URL` is set before starting the app.
+
+#### 4d. Available bot commands
+
+Once running, you can message the bot directly:
+
+| Command | Effect |
 |---|---|
-| `chat:write` | Post messages and alerts |
-| `channels:read` | Resolve channel names |
-| `im:read` | Read DMs |
-| `im:write` | Post in DMs |
-
-Click **Install to Workspace** and copy the **Bot User OAuth Token** (`xoxb-...`) into `.env`:
-
-```env
-SLACK_BOT_TOKEN=xoxb-...
-```
-
-#### 4c. Enable Event Subscriptions
-
-1. Go to **Event Subscriptions → Enable Events**
-2. Request URL: `https://YOUR_NGROK_URL.ngrok-free.app/slack/events`
-3. Slack will send a challenge — the app must be running to verify it (see step 6)
-4. Subscribe to bot events:
-   - `message.im` — direct messages
-   - `app_mention` — @mentions
-
-#### 4d. Enable Interactive Components
-
-1. Go to **Interactivity & Shortcuts → Enable Interactivity**
-2. Request URL: `https://YOUR_NGROK_URL.ngrok-free.app/slack/actions`
-
-#### 4e. Copy the signing secret
-
-**Basic Information → App Credentials → Signing Secret** → paste into `.env`:
-
-```env
-SLACK_SIGNING_SECRET=your_signing_secret
-```
-
-#### 4f. Create the alert channels
-
-In Slack, create two channels and invite the MessageOS bot to each:
-
-```
-#message-os-alerts   — real-time alerts with action buttons
-#message-os-digest   — 3× daily summary digest
-```
-
-Update `.env` if you use different channel names:
-
-```env
-SLACK_ALERTS_CHANNEL=#message-os-alerts
-SLACK_DIGEST_CHANNEL=#message-os-digest
-```
+| `/start` | Shows a welcome message and command list |
+| `/status` | Shows current LLM provider and system status |
+| `/digest` | Triggers an on-demand digest right now |
 
 ---
 
@@ -307,6 +292,8 @@ All settings live in `.env`. Key variables:
 | `LLM_PROVIDER` | `ollama` | `ollama` \| `groq` \| `openai` |
 | `LLM_SMART_MODEL` | `llama3.3` | Model for drafts, research summaries |
 | `LLM_FAST_MODEL` | `llama3.2` | Model for triage, task extraction |
+| `TELEGRAM_BOT_TOKEN` | — | Token from @BotFather |
+| `TELEGRAM_CHAT_ID` | — | Your personal chat ID with the bot |
 | `DIGEST_TIMES` | `08:00,12:30,19:00` | Comma-separated HH:MM digest schedule |
 | `MEETING_SLOT_COUNT` | `3` | Number of calendar slots to suggest |
 | `MEETING_LOOKAHEAD_DAYS` | `7` | How many days ahead to look for slots |
@@ -317,11 +304,14 @@ All settings live in `.env`. Key variables:
 
 ## How alerts look
 
-```
-🚨  Meeting Request: Technical Interview — Meta Recruiter
+Alerts arrive as Telegram messages with inline keyboard buttons:
 
-From:       recruiter@meta.com        Source:  gmail_work
-Priority:   High                      Category: Meeting Request
+```
+🚨 Meeting Request: Technical Interview
+
+From: recruiter@meta.com
+Source: gmail_work
+Priority: High
 
 Research:
 Meta recently announced Q3 earnings beat expectations. The team is
@@ -333,10 +323,16 @@ Available slots:
 2. Wed Jan 15, 10:00 AM
 3. Thu Jan 16, 4:00 PM
 
-[ Show Draft ]  [ Suggest Slots ]  [ Ask for More Info ]  [ Dismiss ]
+┌─────────────┬───────────────┐
+│  Show Draft │ Suggest Slots │
+├─────────────┴───────────────┤
+│  Ask for More Info          │
+├─────────────────────────────┤
+│  ❌ Dismiss                 │
+└─────────────────────────────┘
 ```
 
-Clicking a button posts a new message in `#message-os-alerts` with the result.
+Tapping a button sends a new message in your chat with the result (draft text, slot confirmation, etc.).
 
 ---
 
