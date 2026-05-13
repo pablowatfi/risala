@@ -44,7 +44,7 @@ def _parse_gmail(event: dict) -> dict:
         "message_id": event["message_id"],
         "source": event["source"],
         "sender": event.get("sender", ""),
-        "subject": event.get("subject", ""),
+        "subject": event.get("subject") or "",
         "body": _strip_signature(event.get("body", "")),
         "thread_id": event.get("thread_id", ""),
         "received_at": event.get("received_at", datetime.now(timezone.utc).isoformat()),

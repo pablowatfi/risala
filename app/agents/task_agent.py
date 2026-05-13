@@ -22,13 +22,18 @@ class TaskList(BaseModel):
 
 
 _PROMPT = """You are an assistant that extracts action items from messages.
+Today's date is {today}.
 
 From: {sender}
 Subject: {subject}
 Body:
 {body}
 
-Extract every explicit action item. Include deadlines and owners when clearly stated.
+Extract every explicit action item. For each task:
+- task: short imperative sentence describing the action
+- due_date: ISO date string (YYYY-MM-DD) if a deadline is mentioned, else null
+- owner: person responsible if explicitly named, else null
+
 Return an empty list if there are no action items."""
 
 
@@ -38,6 +43,7 @@ async def task_node(state: MessageState) -> dict:
 
     result: TaskList = await llm.ainvoke(
         _PROMPT.format(
+            today=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             sender=msg.get("sender", ""),
             subject=msg.get("subject", "") or "(no subject)",
             body=(msg.get("body", "") or "")[:3000],

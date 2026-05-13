@@ -13,10 +13,12 @@ from app.agents.telegram_notify import telegram_notify_node
 # Research → Meeting → Task → Draft → Notify, skipping steps not needed.
 
 def _route_after_triage(state: MessageState) -> str:
-    if state["classification"].get("needs_research"):
+    clf = state["classification"]
+    if not clf.get("is_work_related"):
+        return END
+    if clf.get("needs_research"):
         return "research"
-    category = state["classification"].get("category", "informational")
-    if category == "meeting":
+    if clf.get("category") == "meeting":
         return "meeting"
     return "task_agent"
 
@@ -25,10 +27,6 @@ def _route_after_research(state: MessageState) -> str:
     category = state["classification"].get("category", "informational")
     if category == "meeting":
         return "meeting"
-    return "task_agent"
-
-
-def _route_after_meeting(state: MessageState) -> str:
     return "task_agent"
 
 
@@ -62,6 +60,7 @@ def build_graph(checkpointer=None):
     g.add_edge("ingestion", "triage")
 
     g.add_conditional_edges("triage", _route_after_triage, {
+        END: END,
         "research": "research",
         "meeting": "meeting",
         "task_agent": "task_agent",

@@ -9,7 +9,7 @@ class MessageState(TypedDict):
     normalized_message: dict  # {message_id, source, sender, subject, body, thread_id, received_at}
 
     # Triage output
-    classification: dict      # {priority, category, needs_research, needs_draft, reasoning}
+    classification: dict      # {is_work_related, priority, category, needs_research, needs_draft, reasoning}
 
     # Research agent output (None if not triggered)
     research: Optional[dict]  # {summary, sources}

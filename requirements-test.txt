@@ -1,0 +1,12 @@
+-r requirements.txt
+
+# Test runner
+pytest>=8.0.0
+pytest-asyncio>=0.24.0
+pytest-mock>=3.14.0
+
+# In-memory DB for tests (no Postgres needed)
+aiosqlite>=0.20.0
+
+# HTTP mocking
+respx>=0.21.0
