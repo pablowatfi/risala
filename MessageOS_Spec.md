@@ -49,11 +49,9 @@ send draft to clipboard - mark done
 ## 3. High-level architecture
 
 ``` text
-Gmail (2) --------\
-                   \
-                    -> ingestion -> LangGraph -> action router -> Telegram (alerts + buttons)
+Gmail (2) ---------> ingestion -> LangGraph -> action router -> Telegram (alerts + buttons)
                    /
-Slack workspace --/   (monitored inbox source)
+                     (monitored inbox source)
 
                            ↓
                         PostgreSQL
@@ -83,7 +81,7 @@ used per-agent (`LLM_SMART_MODEL`, `LLM_FAST_MODEL`):
 | `groq` *(free cloud)* | `llama-3.3-70b-versatile` | `llama-3.1-8b-instant` | Free tier |
 | `openai` *(production)* | `gpt-4o` | `gpt-4o-mini` | Paid |
 
-Smart model used for: research summarization, draft generation, complex triage.  
+Smart model used for: research summarization, draft generation, complex triage.
 Fast model used for: classification, urgency scoring, lightweight extraction.
 
 All providers are supported by LangChain — swapping requires only the `.env` change; no code changes needed.
