@@ -1,6 +1,6 @@
 """
 Gmail integration — OAuth token management and message fetching.
-Uses Gmail push notifications (via Google Pub/Sub) for real-time delivery.
+Uses scheduled polling (3×/day) instead of push notifications.
 NEVER sends email.
 """
 import asyncio
@@ -122,48 +122,54 @@ async def fetch_message(message_id: str, source: str) -> dict | None:
     return _parse_gmail_message(raw_msg, source)
 
 
-async def fetch_messages_since(history_id: str, source: str) -> list[dict]:
-    """Fetch messages added since a given history ID (used with push notifications)."""
+async def get_current_history_id(source: str) -> str | None:
+    """Return the current historyId for an account (used to bookmark position on first run)."""
     token_file = _ACCOUNTS[source]["token_file"]
     creds = await asyncio.to_thread(_load_or_refresh_creds, token_file)
     if not creds:
-        return []
+        return None
 
     def _fetch():
         service = build("gmail", "v1", credentials=creds)
-        history = service.users().history().list(
-            userId="me",
-            startHistoryId=history_id,
-            historyTypes=["messageAdded"],
-        ).execute()
+        return service.users().getProfile(userId="me").execute().get("historyId")
+
+    return await asyncio.to_thread(_fetch)
+
+
+async def fetch_messages_since(history_id: str, source: str) -> tuple[list[dict], str | None]:
+    """
+    Fetch messages added since history_id for the given account.
+    Returns (messages, new_history_id). new_history_id should be stored for the next poll.
+    Returns ([], None) if credentials are unavailable or history is too old.
+    """
+    token_file = _ACCOUNTS[source]["token_file"]
+    creds = await asyncio.to_thread(_load_or_refresh_creds, token_file)
+    if not creds:
+        return [], None
+
+    def _fetch():
+        service = build("gmail", "v1", credentials=creds)
+        try:
+            response = service.users().history().list(
+                userId="me",
+                startHistoryId=history_id,
+                historyTypes=["messageAdded"],
+                labelId="INBOX",
+            ).execute()
+        except Exception:
+            # historyId too old or invalid — caller should reset
+            return [], None
+
         messages = []
-        for record in history.get("history", []):
+        for record in response.get("history", []):
             for added in record.get("messagesAdded", []):
                 msg_id = added["message"]["id"]
                 raw = service.users().messages().get(
                     userId="me", id=msg_id, format="raw"
                 ).execute()
                 messages.append(_parse_gmail_message(raw, source))
-        return messages
+
+        new_history_id = response.get("historyId")
+        return messages, new_history_id
 
     return await asyncio.to_thread(_fetch)
-
-
-async def register_push_notifications(source: str) -> None:
-    """Register Gmail push via Pub/Sub. Call once on startup if topic is configured."""
-    if not settings.GMAIL_PUBSUB_TOPIC:
-        return
-
-    token_file = _ACCOUNTS[source]["token_file"]
-    creds = await asyncio.to_thread(_load_or_refresh_creds, token_file)
-    if not creds:
-        return
-
-    def _watch():
-        service = build("gmail", "v1", credentials=creds)
-        service.users().watch(
-            userId="me",
-            body={"topicName": settings.GMAIL_PUBSUB_TOPIC, "labelIds": ["INBOX"]},
-        ).execute()
-
-    await asyncio.to_thread(_watch)

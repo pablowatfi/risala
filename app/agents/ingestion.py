@@ -1,6 +1,7 @@
 """
-Normalises raw Gmail / Slack webhook payloads into a common dict shape.
-No LLM is needed here — pure parsing.
+Normalises raw Gmail webhook payloads into a common dict shape.
+Detects LinkedIn/Wellfound job digest senders and annotates with job_source.
+No LLM needed — pure parsing.
 """
 import re
 from datetime import datetime, timezone
@@ -10,7 +11,7 @@ from app.graph.state import MessageState
 # ── Signature strippers ───────────────────────────────────────────────────────
 
 _SIGNATURE_PATTERNS = [
-    r"\n--\s*\n.*",            # standard -- delimiter
+    r"\n--\s*\n.*",
     r"\nSent from my .*",
     r"\nGet Outlook for .*",
     r"\nBest,?\n.*",
@@ -25,57 +26,42 @@ def _strip_signature(body: str) -> str:
     return _SIGNATURE_RE.sub("", body).strip()
 
 
-# ── Source-specific parsers ───────────────────────────────────────────────────
+# ── Job source detection ──────────────────────────────────────────────────────
+
+_LINKEDIN_DOMAINS = {"linkedin.com", "e.linkedin.com", "em.linkedin.com", "jobs.linkedin.com"}
+_WELLFOUND_DOMAINS = {"wellfound.com", "angel.co", "notifications.wellfound.com"}
+
+
+def _detect_job_source(sender: str) -> str | None:
+    """Return 'linkedin', 'wellfound', or None based on sender domain."""
+    # Extract domain from "Display Name <addr@domain.com>" or plain "addr@domain.com"
+    match = re.search(r"@([\w.\-]+)", sender)
+    if not match:
+        return None
+    domain = match.group(1).lower()
+
+    if any(domain == d or domain.endswith("." + d) for d in _LINKEDIN_DOMAINS):
+        return "linkedin"
+    if any(domain == d or domain.endswith("." + d) for d in _WELLFOUND_DOMAINS):
+        return "wellfound"
+    return None
+
+
+# ── Gmail parser ──────────────────────────────────────────────────────────────
 
 def _parse_gmail(event: dict) -> dict:
-    """
-    event shape produced by integrations/gmail.py after fetching the full message.
-    {
-      "source": "gmail_work" | "gmail_personal",
-      "message_id": str,
-      "thread_id": str,
-      "sender": str,
-      "subject": str,
-      "body": str,
-      "received_at": ISO str,
-    }
-    """
+    sender = event.get("sender", "")
+    job_source = _detect_job_source(sender)
     return {
         "message_id": event["message_id"],
         "source": event["source"],
-        "sender": event.get("sender", ""),
+        "sender": sender,
         "subject": event.get("subject") or "",
         "body": _strip_signature(event.get("body", "")),
         "thread_id": event.get("thread_id", ""),
         "received_at": event.get("received_at", datetime.now(timezone.utc).isoformat()),
-    }
-
-
-def _parse_slack(event: dict) -> dict:
-    """
-    event shape from Slack Events API callback (event_callback type).
-    """
-    inner = event.get("event", event)
-    user = inner.get("user", inner.get("username", "unknown"))
-    text = inner.get("text", "")
-    ts = inner.get("ts", "")
-    thread_ts = inner.get("thread_ts", ts)
-
-    received_at = datetime.now(timezone.utc).isoformat()
-    if ts:
-        try:
-            received_at = datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat()
-        except ValueError:
-            pass
-
-    return {
-        "message_id": f"slack_{ts}",
-        "source": "slack",
-        "sender": user,
-        "subject": "",
-        "body": text,
-        "thread_id": thread_ts,
-        "received_at": received_at,
+        "job_source": job_source,  # "linkedin" | "wellfound" | None
+        "type": "job_digest" if job_source else "email",
     }
 
 
@@ -83,14 +69,5 @@ def _parse_slack(event: dict) -> dict:
 
 async def ingestion_node(state: MessageState) -> dict:
     event = state["raw_event"]
-    source = event.get("source", "")
-
-    if source.startswith("gmail"):
-        normalized = _parse_gmail(event)
-    elif source == "slack" or "event" in event:
-        normalized = _parse_slack(event)
-    else:
-        # Fallback: treat as slack-style if unknown
-        normalized = _parse_slack(event)
-
+    normalized = _parse_gmail(event)
     return {"normalized_message": normalized}

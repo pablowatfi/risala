@@ -1,90 +1,75 @@
 """
-Runs Tavily web search and summarises the results.
-Only executes when classification.needs_research is True.
-
-Query generation: a fast LLM call converts the email content into a focused search
-query before hitting Tavily. This means for a recruiter email mentioning a technical
-interview, the query becomes something like "Meta ML engineer interview experience
-Glassdoor leetcode" rather than just the sender address and subject line.
+Company research utility — used by job_pipeline and by the cover_letter Telegram handler.
+CV documents are loaded once at startup and cached for the process lifetime.
 """
-from app.graph.state import MessageState
+import json
+from pathlib import Path
+
+from app.config import settings
 from app.integrations.websearch import web_search
 from app.llm import get_llm
 
-_QUERY_PROMPT = """You are helping an inbox assistant research context for a message the user received.
-
-From: {sender}
-Subject: {subject}
-Body:
-{body}
-
-Generate ONE focused web search query that would surface the most useful background
-information to help the user respond to this message.
-
-Think about what the user would actually want to know:
-- Recruiter email for an ML role at Meta → "Meta ML engineer interview experience Glassdoor leetcode"
-- Email about a technical interview including live coding → "{{company}} {{role}} technical interview experience leetcode"
-- Email from an unfamiliar company proposing a partnership → "{{company}} reviews reputation funding"
-- Email from a VC firm → "{{vc_firm}} portfolio investment thesis"
-
-Return ONLY the search query string, nothing else."""
-
-_SUMMARY_PROMPT = """You are a research assistant preparing a briefing for an inbox assistant.
-
-The user received this message:
-From: {sender}
-Subject: {subject}
-Body:
-{body}
-
-Web search results:
-{results}
-
-Write a 3-5 sentence briefing that gives the user useful context before they respond.
-Ground the briefing in the specific details of the email above — for example, if it mentions
-an interview, summarise what those interviews are typically like; if it mentions a company,
-explain what they do and any relevant recent news.
-Be factual and concise."""
+_cv_cache: str | None = None
 
 
-async def research_node(state: MessageState) -> dict:
-    if not state["classification"].get("needs_research"):
-        return {}
+def load_cv_text() -> str:
+    """Return cached CV text; loads from disk on first call."""
+    global _cv_cache
+    if _cv_cache is not None:
+        return _cv_cache
 
-    msg = state["normalized_message"]
-    sender = msg.get("sender", "")
-    subject = msg.get("subject", "") or ""
-    body = (msg.get("body", "") or "")[:1000]
+    parts: list[str] = []
 
-    # Use a fast LLM call to generate a context-aware search query from the email content
-    query_llm = get_llm("fast")
-    query_response = await query_llm.ainvoke(
-        _QUERY_PROMPT.format(sender=sender, subject=subject, body=body)
-    )
-    query = query_response.content.strip().strip('"')
+    pdf_dir = Path(settings.CV_PDF_DIR)
+    if pdf_dir.exists():
+        for pdf_path in sorted(pdf_dir.glob("*.pdf")):
+            try:
+                import pypdf
+                reader = pypdf.PdfReader(str(pdf_path))
+                parts.append("\n".join(page.extract_text() or "" for page in reader.pages))
+            except Exception:
+                pass
 
-    results = await web_search(query)
-    if not results:
-        return {"research": {"summary": "No relevant research found.", "sources": []}}
+    jobs_dir = Path(settings.CV_JOBS_DIR)
+    if jobs_dir.exists():
+        for docx_path in sorted(jobs_dir.glob("*.docx")):
+            try:
+                import docx
+                doc = docx.Document(str(docx_path))
+                parts.append("\n".join(p.text for p in doc.paragraphs))
+            except Exception:
+                pass
 
-    formatted = "\n\n".join(
-        f"[{i+1}] {r['title']}\n{r['url']}\n{r['content']}"
-        for i, r in enumerate(results[:5])
-    )
+    _cv_cache = "\n\n---\n\n".join(parts)
+    return _cv_cache
 
-    summary_llm = get_llm("smart")
-    response = await summary_llm.ainvoke(
-        _SUMMARY_PROMPT.format(
-            sender=sender,
-            subject=subject,
-            body=body,
-            results=formatted,
+
+_COVER_LETTER_PROMPT = """Write a concise, professional cover letter for this job application.
+
+Job:
+Title: {title}
+Company: {company}
+Description: {description}
+
+Candidate's CV and Experience:
+{cv_text}
+
+Guidelines:
+- 3-4 paragraphs, direct and genuine
+- Highlight the most relevant experience for this specific role
+- Do NOT include date, address header, or sign-off name placeholder
+- This is a draft only — it will never be sent automatically"""
+
+
+async def generate_cover_letter(title: str, company: str, description: str) -> str:
+    cv_text = load_cv_text()
+    llm = get_llm("smart")
+    response = await llm.ainvoke(
+        _COVER_LETTER_PROMPT.format(
+            title=title,
+            company=company,
+            description=(description or "")[:1000],
+            cv_text=cv_text[:3000],
         )
     )
-
-    return {
-        "research": {
-            "summary": response.content,
-            "sources": [{"title": r["title"], "url": r["url"]} for r in results[:5]],
-        }
-    }
+    return response.content

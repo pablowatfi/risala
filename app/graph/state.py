@@ -2,32 +2,26 @@ from typing import TypedDict, Optional
 
 
 class MessageState(TypedDict):
-    # Raw payload received from Gmail webhook or Slack Events API
+    # Raw payload received from Gmail webhook
     raw_event: dict
 
     # Normalised fields after ingestion agent
-    normalized_message: dict  # {message_id, source, sender, subject, body, thread_id, received_at}
+    # Includes job_source: "linkedin" | "wellfound" | None
+    normalized_message: dict
 
-    # Triage output
-    classification: dict      # {is_work_related, priority, category, needs_research, needs_draft, reasoning}
+    # Triage output: {category: "job_digest" | "informational"}
+    classification: dict
 
-    # Research agent output (None if not triggered)
-    research: Optional[dict]  # {summary, sources}
+    # Job pipeline fields (populated only for job_digest emails)
+    extracted_jobs: list       # raw parsed jobs from digest body
+    filtered_jobs: list        # after dedup + location/remote filter
+    scored_jobs: list          # each entry includes match_tag: low|medium|high
 
-    # Task agent output
-    tasks: list               # [{task, due_date, owner}]
-
-    # Meeting agent output
-    meeting_options: list     # [{start, end, label}]
-
-    # Draft agent output
-    draft: Optional[str]
+    # Company research keyed by job external_id (medium + high only)
+    job_research: Optional[dict]
 
     # Set after human taps a Telegram inline button
     user_decision: Optional[str]
-
-    # DB primary key of the saved Message row
-    db_message_id: Optional[int]
 
     # Propagated error message (non-fatal; pipeline continues)
     error: Optional[str]

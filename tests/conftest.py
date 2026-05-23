@@ -3,12 +3,11 @@ Shared fixtures, DB setup, and LLM-as-judge helper for all tests.
 """
 import os
 import pytest
-import app.agents.triage as triage_module
-import app.agents.task_agent as task_module
-import app.agents.draft as draft_module
+import app.agents.job_pipeline as pipeline_module
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from app.db.models import Base
+
 
 # ── In-memory SQLite DB (replaces Postgres for all tests) ────────────────────
 
@@ -21,8 +20,7 @@ async def test_db(monkeypatch):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    for mod in (triage_module, task_module, draft_module):
-        monkeypatch.setattr(mod, "AsyncSessionLocal", TestSession)
+    monkeypatch.setattr(pipeline_module, "AsyncSessionLocal", TestSession)
 
     try:
         import app.api.telegram_webhook as wh_mod
@@ -36,7 +34,7 @@ async def test_db(monkeypatch):
 
 # ── LLM-as-judge ─────────────────────────────────────────────────────────────
 
-JUDGE_PASS_THRESHOLD = 7  # score out of 10
+JUDGE_PASS_THRESHOLD = 7
 
 
 class JudgeVerdict(BaseModel):
@@ -47,17 +45,10 @@ class JudgeVerdict(BaseModel):
 
 
 async def llm_judge(output: str, criteria: str, context: str = "") -> JudgeVerdict:
-    """
-    Ask the smart LLM to evaluate an agent output against explicit criteria.
-
-    Best practice: the judge prompt is kept separate from the agent prompts,
-    uses a different model tier where possible, and scores against concrete
-    measurable criteria rather than vague quality signals.
-    """
     from app.llm import get_llm
     llm = get_llm("smart").with_structured_output(JudgeVerdict)
 
-    prompt = f"""You are an expert evaluator for an AI inbox assistant.
+    prompt = f"""You are an expert evaluator for an AI job-matching assistant.
 Your job is to assess whether an agent produced a correct and useful output.
 
 Score 0-10 where:
@@ -82,14 +73,12 @@ Be strict. A score of 7+ means you would trust this output to be shown to the us
 
 @pytest.fixture
 def judge():
-    """Fixture that exposes the llm_judge coroutine."""
     return llm_judge
 
 
 # ── Skip helpers ──────────────────────────────────────────────────────────────
 
 def requires_llm():
-    """Skip if no LLM provider is configured/reachable."""
     from app.config import settings
     if settings.LLM_PROVIDER == "ollama":
         import httpx
@@ -107,7 +96,6 @@ def requires_llm():
 
 
 def requires_gmail(account: str = "gmail_work"):
-    """Skip if Gmail token file is missing."""
     from app.config import settings
     token_file = (
         settings.GMAIL_WORK_TOKEN_FILE

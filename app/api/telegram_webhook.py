@@ -2,81 +2,135 @@
 /telegram/webhook — single endpoint for all Telegram updates.
 
 Handles:
-  - Text messages from the user (future: commands like /status)
-  - Inline keyboard callback_queries (button taps on alerts)
+  - Text commands (/start, /status)
+  - Inline keyboard callbacks from job alerts (apply, research, cover_letter, dismiss)
 """
+import json
+
 from fastapi import APIRouter, Request
-from telegram import Update
-from app.integrations.telegram import get_bot, answer_callback, send_message
-from app.db.session import AsyncSessionLocal
-from app.db.models import Message, Draft, Action
 from sqlalchemy import select
+from telegram import Update
+
+from app.agents.research import generate_cover_letter
+from app.db.models import JobAction, JobPosting, JobResearch
+from app.db.session import AsyncSessionLocal
+from app.integrations.telegram import answer_callback, get_bot, send_message
 
 router = APIRouter(prefix="/telegram", tags=["telegram"])
 
 
-# ── Callback action handlers ──────────────────────────────────────────────────
+# ── DB helpers ────────────────────────────────────────────────────────────────
 
-async def _get_draft(db_id: int) -> Draft | None:
+async def _get_job(db_id: int) -> JobPosting | None:
+    async with AsyncSessionLocal() as session:
+        return await session.get(JobPosting, db_id)
+
+
+async def _get_research(job_posting_id: int) -> JobResearch | None:
     async with AsyncSessionLocal() as session:
         result = await session.execute(
-            select(Draft).where(Draft.message_id == db_id).order_by(Draft.created_at.desc())
+            select(JobResearch)
+            .where(JobResearch.job_posting_id == job_posting_id)
+            .order_by(JobResearch.created_at.desc())
         )
         return result.scalars().first()
 
 
-async def _get_message(db_id: int) -> Message | None:
+async def _record_action(job_posting_id: int, action_type: str) -> None:
     async with AsyncSessionLocal() as session:
-        return await session.get(Message, db_id)
-
-
-async def _record_action(db_id: int, action_type: str) -> None:
-    async with AsyncSessionLocal() as session:
-        session.add(Action(message_id=db_id, action_type=action_type))
+        session.add(JobAction(job_posting_id=job_posting_id, action_type=action_type))
         await session.commit()
 
 
-async def _handle_show_draft(db_id: int) -> None:
-    draft = await _get_draft(db_id)
-    if draft:
-        await send_message(f"<b>Draft reply:</b>\n\n<code>{draft.draft_text}</code>")
-    else:
-        await send_message("No draft available for this message.")
-    await _record_action(db_id, "show_draft")
+# ── Action handlers ───────────────────────────────────────────────────────────
 
-
-async def _handle_suggest_slots(db_id: int) -> None:
-    msg = await _get_message(db_id)
-    subject = msg.subject if msg else "this message"
-    await send_message(f"Slots were shown in the original alert for: <i>{subject}</i>")
-    await _record_action(db_id, "suggest_slots")
-
-
-async def _handle_ask_more_info(db_id: int) -> None:
-    draft = await _get_draft(db_id)
-    if draft:
+async def _handle_apply(db_id: int) -> None:
+    job = await _get_job(db_id)
+    if job and job.apply_url:
         await send_message(
-            f"<b>Draft — asking for more info:</b>\n\n<code>{draft.draft_text}</code>"
+            f"🔗 <b>Apply — {job.title} @ {job.company}</b>\n\n{job.apply_url}"
         )
     else:
-        await send_message("No draft available. The pipeline will generate one if a reply is needed.")
-    await _record_action(db_id, "ask_more_info")
+        await send_message("No application URL stored for this job.")
+    await _record_action(db_id, "apply_link")
+
+
+async def _handle_research(db_id: int) -> None:
+    job = await _get_job(db_id)
+    research = await _get_research(db_id)
+
+    if not job:
+        await send_message("Job not found.")
+        return
+
+    lines = [f"🔍 <b>Company Research — {job.company}</b>\n"]
+
+    if research:
+        if research.glassdoor_summary:
+            lines.append(f"<b>Glassdoor:</b> {research.glassdoor_summary}")
+        if research.salary_range:
+            lines.append(f"<b>Salary:</b> {research.salary_range}")
+        if research.reddit_summary:
+            lines.append(f"<b>Reddit:</b> {research.reddit_summary}")
+        if research.news_summary:
+            lines.append(f"<b>News:</b> {research.news_summary}")
+
+        if research.sources_json:
+            try:
+                sources = json.loads(research.sources_json)[:3]
+                if sources:
+                    lines.append("\n<b>Sources:</b>")
+                    lines += [f"• <a href='{s['url']}'>{s['title'][:60]}</a>" for s in sources]
+            except Exception:
+                pass
+    else:
+        lines.append("No research data available for this company.")
+
+    await send_message("\n".join(lines))
+    await _record_action(db_id, "research_company")
+
+
+async def _handle_cover_letter(db_id: int) -> None:
+    job = await _get_job(db_id)
+    if not job:
+        await send_message("Job not found.")
+        return
+
+    await send_message(f"⏳ Generating cover letter for {job.title} @ {job.company}…")
+
+    letter = await generate_cover_letter(
+        title=job.title,
+        company=job.company,
+        description=job.description or "",
+    )
+
+    async with AsyncSessionLocal() as session:
+        j = await session.get(JobPosting, db_id)
+        if j:
+            j.cover_letter = letter
+            await session.commit()
+
+    await send_message(
+        f"📝 <b>Cover Letter Draft — {job.title} @ {job.company}</b>\n\n"
+        f"<code>{letter}</code>"
+    )
+    await _record_action(db_id, "cover_letter")
 
 
 async def _handle_dismiss(db_id: int) -> None:
     async with AsyncSessionLocal() as session:
-        msg = await session.get(Message, db_id)
-        if msg:
-            msg.status = "dismissed"
+        job = await session.get(JobPosting, db_id)
+        if job:
+            job.status = "dismissed"
             await session.commit()
-    await send_message("✓ Alert dismissed.")
+    await send_message("✓ Job dismissed.")
     await _record_action(db_id, "dismiss")
 
 
 _ACTION_HANDLERS = {
-    "show_draft": _handle_show_draft,
-    "suggest_slots": _handle_suggest_slots,
-    "ask_more_info": _handle_ask_more_info,
+    "apply": _handle_apply,
+    "research": _handle_research,
+    "cover_letter": _handle_cover_letter,
     "dismiss": _handle_dismiss,
 }
 
@@ -88,10 +142,9 @@ async def telegram_webhook(request: Request):
     data = await request.json()
     update = Update.de_json(data, get_bot())
 
-    # ── Button tap ────────────────────────────────────────────────────────────
     if update.callback_query:
         cq = update.callback_query
-        await answer_callback(cq.id)  # clears the loading spinner
+        await answer_callback(cq.id)
 
         raw = cq.data or ""
         if ":" in raw:
@@ -107,17 +160,16 @@ async def telegram_webhook(request: Request):
 
         return {"ok": True}
 
-    # ── Incoming text message (commands / manual queries) ─────────────────────
     if update.message and update.message.text:
         text = update.message.text.strip()
 
         if text.startswith("/start"):
             await send_message(
                 "👋 <b>MessageOS is running.</b>\n\n"
-                "I'll alert you here when new emails or messages arrive.\n\n"
+                "I monitor your Gmail for LinkedIn and Wellfound job digest emails.\n"
+                "When new matching positions arrive I'll alert you here.\n\n"
                 "Commands:\n"
-                "/status — show system status\n"
-                "/digest — request a digest right now"
+                "/status — show system status"
             )
 
         elif text.startswith("/status"):
@@ -126,9 +178,5 @@ async def telegram_webhook(request: Request):
                 f"✅ <b>Status:</b> Running\n"
                 f"LLM provider: <code>{settings.LLM_PROVIDER}</code>"
             )
-
-        elif text.startswith("/digest"):
-            from app.main import send_digest
-            await send_digest()
 
     return {"ok": True}

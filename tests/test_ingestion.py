@@ -1,18 +1,19 @@
 """
 Unit tests for the ingestion agent — no LLM, no DB, no network.
-Tests: normalisation, signature stripping, Gmail/Slack parsing.
+Tests: normalisation, signature stripping, job source detection, type field.
 """
 import pytest
 from tests.fixtures.messages import (
-    RAW_GMAIL_EVENT,
-    RAW_SLACK_EVENT,
+    RAW_LINKEDIN_EVENT,
+    RAW_WELLFOUND_EVENT,
+    RAW_NEWSLETTER_EVENT,
     EMAIL_WITH_SIGNATURE,
 )
 from app.agents.ingestion import (
     ingestion_node,
     _strip_signature,
     _parse_gmail,
-    _parse_slack,
+    _detect_job_source,
 )
 
 pytestmark = pytest.mark.unit
@@ -52,75 +53,78 @@ class TestSignatureStripping:
         assert "partnership" in result.lower()
 
 
+# ── Job source detection ──────────────────────────────────────────────────────
+
+class TestJobSourceDetection:
+    def test_linkedin_domain(self):
+        assert _detect_job_source("jobalerts-noreply@linkedin.com") == "linkedin"
+
+    def test_linkedin_subdomain(self):
+        assert _detect_job_source("noreply@e.linkedin.com") == "linkedin"
+
+    def test_wellfound_domain(self):
+        assert _detect_job_source("notifications@wellfound.com") == "wellfound"
+
+    def test_angel_co_domain(self):
+        assert _detect_job_source("jobs@angel.co") == "wellfound"
+
+    def test_regular_sender_returns_none(self):
+        assert _detect_job_source("sarah.johnson@meta.com") is None
+
+    def test_newsletter_sender_returns_none(self):
+        assert _detect_job_source("newsletter@tldr.tech") is None
+
+
 # ── Gmail event parsing ───────────────────────────────────────────────────────
 
 class TestGmailParsing:
     def test_normalises_required_fields(self):
-        result = _parse_gmail(RAW_GMAIL_EVENT)
-        assert result["message_id"] == "msg-recruiter-001"
-        assert result["source"] == "gmail_work"
-        assert result["sender"] == "sarah.johnson@meta.com"
-        assert result["subject"] == "Senior ML Engineer opportunity at Meta — Ranking team"
-        assert result["thread_id"] == "thread-recruiter-001"
-        assert result["received_at"] == "2026-05-13T09:15:00Z"
-        assert len(result["body"]) > 0
+        result = _parse_gmail(RAW_LINKEDIN_EVENT)
+        for key in ("message_id", "source", "sender", "subject", "body", "thread_id", "received_at"):
+            assert key in result, f"Missing field: {key}"
 
-    def test_body_present(self):
-        result = _parse_gmail(RAW_GMAIL_EVENT)
-        assert "Meta" in result["body"]
+    def test_job_source_set_for_linkedin(self):
+        result = _parse_gmail(RAW_LINKEDIN_EVENT)
+        assert result["job_source"] == "linkedin"
+
+    def test_job_source_set_for_wellfound(self):
+        result = _parse_gmail(RAW_WELLFOUND_EVENT)
+        assert result["job_source"] == "wellfound"
+
+    def test_job_source_none_for_newsletter(self):
+        result = _parse_gmail(RAW_NEWSLETTER_EVENT)
+        assert result["job_source"] is None
+
+    def test_type_job_digest_for_linkedin(self):
+        result = _parse_gmail(RAW_LINKEDIN_EVENT)
+        assert result["type"] == "job_digest"
+
+    def test_type_email_for_newsletter(self):
+        result = _parse_gmail(RAW_NEWSLETTER_EVENT)
+        assert result["type"] == "email"
 
     def test_missing_subject_defaults_to_empty(self):
-        event = {**RAW_GMAIL_EVENT, "subject": None}
+        event = {**RAW_LINKEDIN_EVENT, "subject": None}
         result = _parse_gmail(event)
         assert result["subject"] == ""
 
-    def test_output_shape(self):
-        result = _parse_gmail(RAW_GMAIL_EVENT)
-        required_keys = {"message_id", "source", "sender", "subject", "body", "thread_id", "received_at"}
-        assert required_keys.issubset(result.keys())
 
-
-# ── Slack event parsing ───────────────────────────────────────────────────────
-
-class TestSlackParsing:
-    def test_normalises_required_fields(self):
-        result = _parse_slack(RAW_SLACK_EVENT)
-        assert result["source"] == "slack"
-        assert result["sender"] == "alice"
-        assert "PR" in result["body"]
-        assert result["message_id"].startswith("slack_")
-
-    def test_output_shape(self):
-        result = _parse_slack(RAW_SLACK_EVENT)
-        required_keys = {"message_id", "source", "sender", "subject", "body", "thread_id", "received_at"}
-        assert required_keys.issubset(result.keys())
-
-    def test_subject_is_empty_for_slack(self):
-        result = _parse_slack(RAW_SLACK_EVENT)
-        assert result["subject"] == ""
-
-
-# ── Ingestion node routing ────────────────────────────────────────────────────
+# ── Ingestion node ────────────────────────────────────────────────────────────
 
 class TestIngestionNode:
-    async def test_routes_gmail_event(self):
-        state = {"raw_event": RAW_GMAIL_EVENT}
-        result = await ingestion_node(state)
-        assert result["normalized_message"]["source"] == "gmail_work"
+    async def test_linkedin_event_normalised(self):
+        result = await ingestion_node({"raw_event": RAW_LINKEDIN_EVENT})
+        assert result["normalized_message"]["source"] == "gmail_personal"
+        assert result["normalized_message"]["job_source"] == "linkedin"
 
-    async def test_routes_slack_event(self):
-        state = {"raw_event": RAW_SLACK_EVENT}
-        result = await ingestion_node(state)
-        assert result["normalized_message"]["source"] == "slack"
+    async def test_newsletter_has_no_job_source(self):
+        result = await ingestion_node({"raw_event": RAW_NEWSLETTER_EVENT})
+        assert result["normalized_message"]["job_source"] is None
 
     async def test_returns_normalized_message_key(self):
-        state = {"raw_event": RAW_GMAIL_EVENT}
-        result = await ingestion_node(state)
+        result = await ingestion_node({"raw_event": RAW_LINKEDIN_EVENT})
         assert "normalized_message" in result
 
-    async def test_normalized_message_has_all_fields(self):
-        state = {"raw_event": RAW_GMAIL_EVENT}
-        result = await ingestion_node(state)
-        msg = result["normalized_message"]
-        for key in ("message_id", "source", "sender", "subject", "body", "thread_id", "received_at"):
-            assert key in msg, f"Missing field: {key}"
+    async def test_normalized_message_has_type_field(self):
+        result = await ingestion_node({"raw_event": RAW_LINKEDIN_EVENT})
+        assert result["normalized_message"]["type"] == "job_digest"

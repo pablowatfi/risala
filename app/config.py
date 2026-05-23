@@ -21,7 +21,6 @@ class Settings(BaseSettings):
     # Telegram
     TELEGRAM_BOT_TOKEN: str = ""
     TELEGRAM_CHAT_ID: str = ""   # your personal chat ID with the bot
-    DIGEST_TIMES: str = "08:00,12:30,19:00"
 
     # Gmail
     GMAIL_CREDENTIALS_FILE: str = "credentials/gmail_credentials.json"
@@ -29,22 +28,29 @@ class Settings(BaseSettings):
     GMAIL_PERSONAL_TOKEN_FILE: str = "credentials/gmail_personal_token.json"
     GMAIL_WORK_ADDRESS: str = ""
     GMAIL_PERSONAL_ADDRESS: str = ""
-    GMAIL_PUBSUB_TOPIC: str = ""
 
-    # Calendar
-    GOOGLE_CALENDAR_ID: str = "primary"
-    MEETING_SLOT_COUNT: int = 3
-    MEETING_LOOKAHEAD_DAYS: int = 7
+    # Polling schedule (3× daily by default, local timezone HH:MM)
+    POLL_TIMES: str = "08:00,12:30,19:00"
+    GMAIL_POLL_STATE_FILE: str = ".gmail_poll_state.json"
 
     # Search
     TAVILY_API_KEY: Optional[str] = None
 
-    # Webhook
+    # CV documents (loaded at startup for job matching and cover letters)
+    CV_PDF_DIR: str = "./cv_docs/pdf"
+    CV_JOBS_DIR: str = "./cv_docs/jobs"
+
+    # Langfuse observability (optional — leave blank to disable)
+    LANGFUSE_PUBLIC_KEY: Optional[str] = None
+    LANGFUSE_SECRET_KEY: Optional[str] = None
+    LANGFUSE_HOST: str = "https://cloud.langfuse.com"
+
+    # Webhook (used only for Telegram)
     WEBHOOK_BASE_URL: str = "http://localhost:8000"
 
     @property
-    def digest_times_list(self) -> list[str]:
-        return [t.strip() for t in self.DIGEST_TIMES.split(",")]
+    def poll_times_list(self) -> list[str]:
+        return [t.strip() for t in self.POLL_TIMES.split(",")]
 
 
 settings = Settings()

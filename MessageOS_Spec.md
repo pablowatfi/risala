@@ -5,21 +5,18 @@
 Build a **local-first AI assistant** that monitors:
 
 -   2 Gmail accounts
--   Slack workspace(s)
 
 and performs:
 
-1.  message ingestion
-2.  classification / prioritization
-3.  task extraction
-4.  research augmentation (web search before user reads)
-5.  meeting recommendation (never auto-book)
-6.  draft email/message suggestion (never auto-send)
-7.  Telegram-based user interaction (approvals, alerts, digests)
+1.  email ingestion and classification
+2.  job posting detection and research (LinkedIn & Wellfound digest emails)
+3.  CV-based match scoring and application priority tagging
+4.  company research (Glassdoor, Reddit, salary data)
+5.  Telegram-based user interaction (alerts, links, follow-up actions)
 
 The system must use **LangGraph** for orchestration.
 
-User interaction (approvals, drafts, slot selection) is handled via **Telegram**.
+User interaction is handled exclusively via **Telegram**.
 
 ------------------------------------------------------------------------
 
@@ -27,22 +24,13 @@ User interaction (approvals, drafts, slot selection) is handled via **Telegram**
 
 ### Rule 1 --- NEVER SEND EMAIL
 
-System may: - draft emails
+System may NOT send, reply to, or draft emails under any circumstances.
+Email is **ingestion-only**.
 
-System may NOT: - send emails - reply automatically
+### Rule 2 --- HUMAN IN LOOP
 
-### Rule 2 --- NEVER CONFIRM MEETINGS
-
-System may: - inspect calendar - suggest slots - draft responses
-
-System may NOT: - accept meetings - book meetings - decline meetings
-
-without explicit human approval.
-
-### Rule 3 --- HUMAN IN LOOP
-
-Any external action requires Telegram approval (inline button tap): - create calendar event -
-send draft to clipboard - mark done
+Any external action requires Telegram approval (inline button tap).
+The system surfaces information and waits; it never acts autonomously.
 
 ------------------------------------------------------------------------
 
@@ -50,12 +38,10 @@ send draft to clipboard - mark done
 
 ``` text
 Gmail (2) ---------> ingestion -> LangGraph -> action router -> Telegram (alerts + buttons)
-                   /
-                     (monitored inbox source)
 
-                           ↓
-                        PostgreSQL
-                        Redis
+                          ↓
+                       PostgreSQL
+                       Redis
 ```
 
 Local deployment only.
@@ -81,14 +67,12 @@ used per-agent (`LLM_SMART_MODEL`, `LLM_FAST_MODEL`):
 | `groq` *(free cloud)* | `llama-3.3-70b-versatile` | `llama-3.1-8b-instant` | Free tier |
 | `openai` *(production)* | `gpt-4o` | `gpt-4o-mini` | Paid |
 
-Smart model used for: research summarization, draft generation, complex triage.
-Fast model used for: classification, urgency scoring, lightweight extraction.
+Smart model used for: job match scoring, company research summarization, cover letter generation.
+Fast model used for: classification, deduplication checks, lightweight extraction.
 
 All providers are supported by LangChain — swapping requires only the `.env` change; no code changes needed.
 
 Search: - Tavily API (web search for Research Agent)
-
-Notifications: - Telegram Bot (`python-telegram-bot>=21.0`)
 
 Database: - PostgreSQL (Docker) - Redis (state/cache)
 
@@ -100,13 +84,14 @@ Containerization: - Docker Compose
 
 ## 5. Local deployment requirements
 
-Gmail push notifications, the Slack Events API (inbox monitoring), and the Telegram
-webhook all require a publicly accessible URL. Use **ngrok** (or localtunnel) to expose
-localhost during development.
+The Telegram webhook requires a publicly accessible URL.
+Use **ngrok** (or localtunnel) to expose localhost during development.
 
 ``` bash
 ngrok http 8000   # exposes FastAPI; copy the forwarding URL into .env
 ```
+
+Gmail uses **scheduled polling** (no public URL needed for email).
 
 docker-compose:
 
@@ -132,25 +117,18 @@ docker compose up
 
 ### Gmail
 
-Use: - Gmail push notifications (requires `WEBHOOK_BASE_URL` via ngrok) - OAuth
+Use: - Scheduled polling 3× daily (`POLL_TIMES` in `.env`) - OAuth
 
 Scopes: - gmail.readonly - gmail.modify (optional labeling only)
 
 Supported accounts: - work - personal
 
-### Slack
+Deduplication: Gmail's history API is used. The app stores the last `historyId`
+per account in `GMAIL_POLL_STATE_FILE`. On each poll only messages added since
+the previous run are fetched. On first startup the current position is bookmarked
+without processing any existing inbox emails.
 
-Use: - Slack Events API (requires `WEBHOOK_BASE_URL` via ngrok)
-
-Listen: - DMs - mentions - app actions
-
-### Calendar
-
-Google Calendar readonly + freebusy.
-
-May read: - free slots
-
-May NOT create events automatically.
+**Not supported:** Slack, Google Calendar.
 
 ------------------------------------------------------------------------
 
@@ -158,9 +136,9 @@ May NOT create events automatically.
 
 ### A. Ingestion Agent
 
-Input: gmail/slack event
+Input: gmail event
 
-Tasks: - normalize - clean signatures - deduplicate
+Tasks: - normalize - clean signatures - deduplicate - detect source type (job digest vs regular email)
 
 Output:
 
@@ -172,7 +150,8 @@ Output:
   "subject": "...",
   "body": "...",
   "thread_id": "...",
-  "received_at": "2024-01-01T09:00:00Z"
+  "received_at": "2024-01-01T09:00:00Z",
+  "type": "job_digest" | "email"
 }
 ```
 
@@ -182,102 +161,102 @@ Output:
 
 Determine: - urgency - category - confidence
 
-Categories: - urgent - task - meeting - research_needed - informational
+Categories: - job_digest - informational
+
+For `job_digest` emails the flow is handed off to the Job Pipeline Agent.
+All other emails are classified as `informational` and discarded; no further action.
 
 Output:
 
 ``` json
 {
-  "priority":"high",
-  "category":"meeting"
+  "priority": "high",
+  "category": "job_digest"
 }
 ```
 
 ------------------------------------------------------------------------
 
-### C. Research Agent
+### C. Job Pipeline Agent
 
-Trigger: if message requires external knowledge.
+Triggered when `category == "job_digest"` (emails from LinkedIn or Wellfound).
 
-Examples: - company interview - product mentioned - news topic -
-technology mentioned
+#### C1. Job Extraction
 
-Tool: **Tavily API** (`tavily-python` SDK, `TAVILY_API_KEY` in `.env`)
+Parse the digest email body and extract each individual job offer:
+- Job title
+- Company name
+- Location / remote status
+- Application URL
 
-Actions: use web search: - company info - latest news - salary info -
-interview prep info - docs/manuals - videos
+#### C2. Deduplication
 
-Output:
+Cross-reference extracted jobs against the `job_postings` table.
+Discard any job whose `external_id` (derived from URL or company+title hash) already exists.
 
-``` json
-{
-  "summary":"Meta recruiter email. Company recently announced...",
-  "sources":[]
-}
-```
+#### C3. Location / Remote Filter
 
-This appears in the Telegram alert.
+Apply source-specific rules before any further processing:
 
-------------------------------------------------------------------------
+| Source | Rule |
+|---|---|
+| LinkedIn | Accept if location mentions Argentina or is labeled "remote from Argentina" |
+| Wellfound | Accept only if description contains "full remote", "fully remote", or equivalent |
 
-### D. Task Agent
+Discard jobs that do not pass their source filter.
 
-Extract: - tasks - deadlines - owner
+#### C4. CV Match Scoring
 
-Store in DB.
+For each passing job:
 
-------------------------------------------------------------------------
+- Load CV documents from `CV_PDF_DIR` (PDF files) and `CV_JOBS_DIR` (Word `.docx` detailed job descriptions) — both configured in `.env`
+- Compare job description against CV content using the smart LLM
+- Output a match tag: `low` | `medium` | `high`
 
-### E. Meeting Agent
+#### C5. Company Research (medium + high only)
 
-If meeting request:
+For jobs tagged `medium` or `high`, run web research via Tavily:
 
-Check: - calendar free slots
+- Glassdoor rating and recent reviews summary
+- Reddit threads mentioning the company (culture, layoffs, interviews)
+- Typical salary range for the role
+- Recent company news
 
-Generate options: - Tue 3pm - Wed 10am - Thu 4pm
-
-Then send via Telegram:
-
-Example: "Recruiter requests technical interview.
-
-Available slots: 1. Tue 3pm 2. Wed 10am 3. Thu 4pm
-
-[ Show Draft ]  [ Suggest Slots ]  [ Ask for More Info ]  [ ❌ Dismiss ]"
-
-Wait for user to tap a button.
+Output a structured `research_summary` stored in the `job_research` table.
 
 ------------------------------------------------------------------------
 
-### F. Draft Agent
-
-Creates: - suggested reply only
-
-Never sends.
-
-Store draft.
-
-------------------------------------------------------------------------
-
-### G. Telegram Notification Agent
+### D. Telegram Notification Agent
 
 Posts to: personal Telegram chat with the user (`TELEGRAM_CHAT_ID`)
 
-Only: - urgent - actionable
+#### Job digest alert
 
-Message format: HTML, with inline keyboard buttons:
-- `[Show Draft]` — posts draft text
-- `[Suggest Slots]` — confirms slots from the alert
-- `[Ask for More Info]` — posts a clarification draft
-- `[❌ Dismiss]` — marks message as dismissed
-
-Digest: fires **3× daily** at times set via `.env`:
+Sends one consolidated message per processed digest containing all `medium` and `high` jobs:
 
 ```
-DIGEST_TIMES=08:00,12:30,19:00   # system local timezone
+💼 New Job Matches — LinkedIn / Wellfound
+
+🟢 HIGH MATCH
+• Senior Backend Engineer @ Stripe (Remote)
+  Research: 4.1★ Glassdoor · "good WLB" on Reddit · ~$180k
+  [Apply] [Research Company] [Cover Letter]
+
+🟡 MEDIUM MATCH
+• Staff Engineer @ Vercel (Remote)
+  Research: 4.3★ Glassdoor · Competitive salaries reported
+  [Apply] [Research Company] [Cover Letter]
+
+(3 low-match jobs discarded)
 ```
 
-Each digest covers new messages since the previous digest window.
-Also triggerable on demand via `/digest` command sent to the bot.
+Button callbacks:
+
+| Button | Action |
+|---|---|
+| `[Apply]` | Posts the direct application URL |
+| `[Research Company]` | Posts full company research summary |
+| `[Cover Letter]` | Generates a tailored cover letter draft (never sends) |
 
 ------------------------------------------------------------------------
 
@@ -288,19 +267,17 @@ class MessageState(TypedDict):
     raw_event: dict
     normalized_message: dict
     classification: dict
-    research: dict | None
-    tasks: list
-    meeting_options: list
-    draft: str | None
+    # job pipeline fields (populated only for job_digest type)
+    extracted_jobs: list
+    filtered_jobs: list
+    scored_jobs: list          # each entry includes match_tag
+    job_research: dict | None  # keyed by job id
     user_decision: str | None
 ```
 
 ------------------------------------------------------------------------
 
 ## 9. LangGraph flow
-
-When multiple conditions are true for a single message, agents run in
-**sequential priority order** before the Telegram notification is sent:
 
 ``` text
 START
@@ -309,27 +286,30 @@ ingestion
   ↓
 triage
   ↓
-[1] if research_needed  -> research_agent
+[if job_digest]
   ↓
-[2] if meeting          -> meeting_agent
+  job_extraction
   ↓
-[3] if task             -> task_agent
+  deduplication
   ↓
-[4] if reply_needed     -> draft_agent
+  location_filter
   ↓
-telegram_notification  (always runs if urgency >= medium)
+  cv_match_scoring
   ↓
-WAIT
+  company_research  (medium + high only, runs in parallel per job)
   ↓
-human taps Telegram button
+  telegram_notification
   ↓
-execute approved action
-```
+  WAIT
+  ↓
+  human taps Telegram button
+  ↓
+  execute approved action  (post link / research / cover letter draft)
 
-All intermediate results are merged into `MessageState` before
-`telegram_notification` runs, so the Telegram alert can include research
-context, available slots, extracted tasks, and a draft reply in one
-message.
+[if informational]
+  ↓
+  do nothing
+```
 
 Must support pause/resume using LangGraph checkpoints.
 
@@ -337,50 +317,35 @@ Must support pause/resume using LangGraph checkpoints.
 
 ## 10. Database schema
 
-### messages
+Only job-related data is persisted. Non-job-digest emails are discarded without storage.
+
+### job_postings
 
 ``` sql
 id
-source           -- 'gmail_work' | 'gmail_personal' | 'slack'
-sender
-subject
-body
-thread_id        -- Gmail thread or Slack thread_ts
-received_at
-priority         -- 'high' | 'medium' | 'low'
-category         -- 'urgent' | 'task' | 'meeting' | 'research_needed' | 'informational'
-status           -- 'new' | 'reviewed' | 'actioned' | 'dismissed'
+source           -- 'linkedin' | 'wellfound'
+external_id      -- hash of URL or company+title, used for deduplication
+title
+company
+location
+apply_url
+description      -- job description snippet extracted from digest
+match_tag        -- 'low' | 'medium' | 'high'
+cover_letter     -- generated draft text (nullable, populated on demand)
+status           -- 'new' | 'notified' | 'applied' | 'dismissed'
 created_at
 ```
 
-### tasks
+### job_research
 
 ``` sql
 id
-message_id
-task
-due_date
-owner            -- extracted from message body (nullable)
-status           -- 'open' | 'done'
-created_at
-```
-
-### research
-
-``` sql
-id
-message_id
-summary
+job_posting_id   -- FK to job_postings
+glassdoor_summary
+reddit_summary
+salary_range
+news_summary
 sources_json
-```
-
-### drafts
-
-``` sql
-id
-message_id
-draft_text
-approved         -- boolean, default false
 created_at
 ```
 
@@ -388,8 +353,8 @@ created_at
 
 ``` sql
 id
-message_id
-action_type      -- 'suggest_slots' | 'show_draft' | 'ask_more_info' | 'dismiss'
+job_posting_id
+action_type      -- 'apply_link' | 'research_company' | 'cover_letter' | 'dismiss'
 status           -- 'pending' | 'approved' | 'rejected'
 created_at
 ```
@@ -398,47 +363,57 @@ created_at
 
 ## 11. Telegram UX
 
-All alerts and interaction go to the user's personal Telegram chat with the bot.
+All alerts go to the user's personal Telegram chat with the bot.
 
-Example alert:
+Example job digest alert:
 
 ```
-🚨 Meeting Request: Technical Interview
+💼 New Job Matches — 3 found (LinkedIn + Wellfound)
 
-From: recruiter@meta.com
-Source: gmail_work  |  Priority: High
+🟢 HIGH — Senior Backend Engineer @ Stripe
+   Remote · Wellfound
+   ⭐ 4.1 Glassdoor · Competitive pay · "Great eng culture" (Reddit)
+   💰 ~$170k–$190k
 
-Research:
-Meta recently announced Q3 earnings beat. Hiring ML engineers for
-Ranking. Typical loop: coding + ML system design + behavioural.
+   [Apply ↗]  [Research Company]  [Cover Letter]
 
-Available slots:
-1. Tue Jan 14, 3:00 PM
-2. Wed Jan 15, 10:00 AM
-3. Thu Jan 16, 4:00 PM
+─────────────────────────────
+🟡 MEDIUM — Staff Engineer @ Vercel
+   Remote · LinkedIn (Argentina)
+   ⭐ 4.3 Glassdoor · Fast-growing · No recent layoffs
+   💰 ~$150k–$180k
 
-[ Show Draft ]  [ Suggest Slots ]
-[ Ask for More Info ]  [ ❌ Dismiss ]
+   [Apply ↗]  [Research Company]  [Cover Letter]
+
+─────────────────────────────
+(4 low-match positions discarded)
 ```
 
-Button callbacks hit `POST /telegram/webhook` (same endpoint as all updates).
+Button callbacks hit `POST /telegram/webhook`.
 
-**After a button is tapped**, the bot posts a **new message** in the chat:
+**After a button is tapped**, the bot posts a new message:
 
 | Button | New message contains |
 |---|---|
-| `[Show Draft]` | Draft text in a code block |
-| `[Suggest Slots]` | Confirmation of slots from the alert |
-| `[Ask for More Info]` | Clarification draft in a code block |
-| `[❌ Dismiss]` | "✓ Alert dismissed." |
-
-Meeting slots use the **system local timezone**. Slot count configurable via `MEETING_SLOT_COUNT`.
-
-Digest fires at 08:00 / 12:30 / 19:00 (local time) and can be triggered on demand with `/digest`.
+| `[Apply ↗]` | Direct application URL |
+| `[Research Company]` | Full Glassdoor / Reddit / salary / news summary |
+| `[Cover Letter]` | Tailored cover letter draft in a code block (never sent) |
 
 ------------------------------------------------------------------------
 
-## 12. Security
+## 12. CV document configuration
+
+``` env
+CV_PDF_DIR=./cv_docs/pdf        # one or more PDF CV files
+CV_JOBS_DIR=./cv_docs/jobs      # Word .docx files with detailed past job descriptions
+```
+
+These files are loaded at startup and cached. The smart LLM uses their
+content to score CV–job fit and generate cover letters.
+
+------------------------------------------------------------------------
+
+## 13. Security
 
 Secrets in: `.env`
 
@@ -448,21 +423,28 @@ Use: - encrypted tokens - local only
 
 ------------------------------------------------------------------------
 
-## 13. Folder structure
+## 14. Folder structure
 
 ``` text
 message_os/
  ├── app/
  │   ├── agents/
+ │   │    ├── ingestion.py
+ │   │    ├── triage.py
+ │   │    ├── job_pipeline.py
+ │   │    ├── research.py
+ │   │    └── telegram_notify.py
  │   ├── graph/
  │   ├── integrations/
  │   │    ├── gmail.py
  │   │    ├── telegram.py
- │   │    ├── calendar.py
  │   │    └── websearch.py
  │   ├── db/
  │   ├── api/
  │   └── main.py
+ ├── cv_docs/
+ │   ├── pdf/
+ │   └── jobs/
  ├── tests/
  ├── docker-compose.yml
  ├── .env.example
@@ -471,26 +453,37 @@ message_os/
 
 ------------------------------------------------------------------------
 
-## 14. MVP definition
+## 15. MVP definition
 
 Done when:
 
 -   receives Gmail from both accounts
--   receives Slack messages (inbox monitoring)
--   classifies urgency and category
--   extracts tasks and stores them in Postgres
--   runs research automatically when useful (via Tavily)
--   sends Telegram alerts with inline action buttons
--   suggests meeting slots but does not book
--   drafts replies but does not send
--   stores everything in Postgres
+-   detects LinkedIn and Wellfound job digest emails
+-   extracts individual job offers from digest emails
+-   deduplicates against previously seen jobs
+-   applies source-specific location/remote filters
+-   scores each job against CV PDFs and past job descriptions
+-   tags jobs as low / medium / high match
+-   runs company research (Glassdoor, Reddit, salary) for medium and high matches
+-   sends Telegram alert with job links, match tags, and research summary
+-   responds to Telegram buttons: apply link, full research, cover letter draft
+-   stores job postings and research in Postgres (non-job emails are discarded)
 -   runs locally via Docker (+ ngrok for webhooks)
+
+------------------------------------------------------------------------
+
+## Explicitly out of scope
+
+-   Slack ingestion (removed)
+-   Google Calendar read or write (removed)
+-   Email drafting or reply suggestions (removed)
+-   Any automatic external action without explicit Telegram approval
 
 ------------------------------------------------------------------------
 
 ## Suggested future enhancements
 
--   Google Calendar write access with explicit approval
--   semantic memory via pgvector
--   follow-up reminders
--   daily planning agent
+-   semantic memory via pgvector for longer-term job preference learning
+-   follow-up reminders for applied positions
+-   daily job digest summary on demand via `/digest` Telegram command
+-   application tracking (status updates per company)
